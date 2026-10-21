@@ -14,18 +14,32 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
 
-// Initialize SQLite database, tables, and seeds
-initDatabase();
+// Asynchronously initialize database tables and seeds (handles both SQLite and Turso/libSQL)
+initDatabase().catch(err => {
+  console.error('Fatal Database initialization error:', err);
+});
 
-// CORS configuration: accept configured origin or any localhost/127.0.0.1 port (for Vite 5173, 5174, etc.)
+// Middleware to ensure DB is initialized before processing API requests (for serverless environments)
+app.use(async (req, res, next) => {
+  try {
+    await initDatabase();
+    next();
+  } catch (err) {
+    console.error('DB ready check failed:', err);
+    res.status(500).json({ error: 'Database initialization failed.' });
+  }
+});
+
+// CORS configuration: accept configured origin, Vercel preview URLs, or localhost
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (like mobile apps, curl, server-to-server)
     if (!origin) return callback(null, true);
     
-    // Allow localhost/127.0.0.1 on any port, or specified CLIENT_ORIGIN
+    // Allow localhost/127.0.0.1 on any port, vercel.app domains, or specified CLIENT_ORIGIN
     const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-    if (isLocalhost || origin === CLIENT_ORIGIN) {
+    const isVercel = /\.vercel\.app$/.test(origin);
+    if (isLocalhost || isVercel || origin === CLIENT_ORIGIN) {
       return callback(null, true);
     }
     return callback(new Error(`CORS blocked for origin: ${origin}`));
@@ -37,7 +51,7 @@ app.use(cors({
 
 app.use(express.json());
 
-// Request logger for debugging and viva inspection
+// Request logger for debugging and inspection
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
@@ -47,12 +61,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint (Required)
+// Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'Unit 4 E-Learning REST API',
-    database: 'SQLite',
+    database: process.env.TURSO_DATABASE_URL ? 'Turso (libSQL Cloud)' : 'SQLite (Local)',
     timestamp: new Date().toISOString()
   });
 });
@@ -81,11 +95,17 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`=================================================`);
-  console.log(`  Unit 4 E-Learning Express Server`);
-  console.log(`  Running on: http://localhost:${PORT}`);
-  console.log(`  Health Check: http://localhost:${PORT}/api/health`);
-  console.log(`  Database: SQLite persistent file`);
-  console.log(`=================================================`);
-});
+// Start listening only in standalone server mode (when executed directly with node server.js)
+const isDirectRun = process.argv[1] && process.argv[1].endsWith('server.js');
+if (isDirectRun && (!process.env.VERCEL)) {
+  app.listen(PORT, () => {
+    console.log(`=================================================`);
+    console.log(`  Unit 4 E-Learning Express Server`);
+    console.log(`  Running on: http://localhost:${PORT}`);
+    console.log(`  Health Check: http://localhost:${PORT}/api/health`);
+    console.log(`  Database: ${process.env.TURSO_DATABASE_URL ? 'Turso (libSQL Cloud)' : 'SQLite (Local)'}`);
+    console.log(`=================================================`);
+  });
+}
+
+export default app;

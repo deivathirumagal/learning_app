@@ -24,7 +24,7 @@ function formatCourse(row) {
 }
 
 // GET /api/courses with search and category/difficulty filtering (Experiment 1)
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { search = '', category = 'All', difficulty = 'All' } = req.query;
 
@@ -49,7 +49,7 @@ router.get('/', (req, res) => {
 
     query += ' ORDER BY title ASC';
 
-    const rows = db.prepare(query).all(...params);
+    const rows = await db.all(query, ...params);
     const courses = rows.map(formatCourse);
     return res.json(courses);
   } catch (err) {
@@ -59,10 +59,10 @@ router.get('/', (req, res) => {
 });
 
 // GET /api/courses/:id
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const row = db.prepare('SELECT * FROM courses WHERE id = ?').get(id);
+    const row = await db.get('SELECT * FROM courses WHERE id = ?', id);
 
     if (!row) {
       return res.status(404).json({ error: `Course with ID '${id}' not found.` });
@@ -76,7 +76,7 @@ router.get('/:id', (req, res) => {
 });
 
 // PUT /api/courses/:id - Update existing course details (Protected)
-router.put('/:id', authenticateToken, (req, res) => {
+router.put('/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -90,12 +90,12 @@ router.put('/:id', authenticateToken, (req, res) => {
       thumbnail
     } = req.body;
 
-    const existing = db.prepare('SELECT * FROM courses WHERE id = ?').get(id);
+    const existing = await db.get('SELECT * FROM courses WHERE id = ?', id);
     if (!existing) {
       return res.status(404).json({ error: `Course with ID '${id}' not found.` });
     }
 
-    // Role check: Admin, Instructor, or authenticated Student (same policy as delete)
+    // Role check: Admin, Instructor, or authenticated Student
     if (req.user && req.user.role && req.user.role !== 'Admin' && req.user.role !== 'Instructor' && req.user.role !== 'Student') {
       return res.status(403).json({ error: 'You are not authorized to update courses.' });
     }
@@ -113,23 +113,13 @@ router.put('/:id', authenticateToken, (req, res) => {
       return res.status(400).json({ error: 'Course title is required.' });
     }
 
-    db.prepare(`
+    await db.run(`
       UPDATE courses 
       SET title = ?, description = ?, category = ?, difficulty = ?, instructor = ?, duration = ?, rating = ?, thumbnail = ?
       WHERE id = ?
-    `).run(
-      updatedTitle,
-      updatedDescription,
-      updatedCategory,
-      updatedDifficulty,
-      updatedInstructor,
-      updatedDuration,
-      updatedRating,
-      updatedThumbnail,
-      id
-    );
+    `, updatedTitle, updatedDescription, updatedCategory, updatedDifficulty, updatedInstructor, updatedDuration, updatedRating, updatedThumbnail, id);
 
-    const updatedRow = db.prepare('SELECT * FROM courses WHERE id = ?').get(id);
+    const updatedRow = await db.get('SELECT * FROM courses WHERE id = ?', id);
 
     return res.json({
       success: true,
@@ -142,24 +132,26 @@ router.put('/:id', authenticateToken, (req, res) => {
   }
 });
 
-// DELETE /api/courses/:id - Delete course from database (Foreign keys cascade to enrollments & progress)
-router.delete('/:id', authenticateToken, (req, res) => {
+// DELETE /api/courses/:id - Delete course from database
+router.delete('/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
 
     // Check if course exists
-    const existing = db.prepare('SELECT id, title FROM courses WHERE id = ?').get(id);
+    const existing = await db.get('SELECT id, title FROM courses WHERE id = ?', id);
     if (!existing) {
       return res.status(404).json({ error: `Course with ID '${id}' not found.` });
     }
 
-    // Role check if user has admin/instructor role (or any authenticated user if standard)
+    // Role check
     if (req.user && req.user.role && req.user.role !== 'Admin' && req.user.role !== 'Instructor' && req.user.role !== 'Student') {
       return res.status(403).json({ error: 'You are not authorized to delete courses.' });
     }
 
-    // Delete course (SQLite foreign_keys=ON ensures enrollments and progress cascade)
-    db.prepare('DELETE FROM courses WHERE id = ?').run(id);
+    // Explicitly clean up related child progress and enrollments records
+    await db.run('DELETE FROM progress WHERE course_id = ?', id);
+    await db.run('DELETE FROM enrollments WHERE course_id = ?', id);
+    await db.run('DELETE FROM courses WHERE id = ?', id);
 
     return res.json({
       success: true,

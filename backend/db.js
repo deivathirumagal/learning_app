@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcrypt';
@@ -9,19 +9,65 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dbPath = process.env.DATABASE_PATH 
+// Turso hosted credentials take precedence, otherwise fallback to local SQLite file
+const isTurso = Boolean(process.env.TURSO_DATABASE_URL);
+const tursoUrl = process.env.TURSO_DATABASE_URL;
+const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;
+
+const localDbPath = process.env.DATABASE_PATH 
   ? path.resolve(__dirname, process.env.DATABASE_PATH)
   : path.resolve(__dirname, 'elearning.sqlite');
 
-export const db = new DatabaseSync(dbPath);
+const clientUrl = isTurso 
+  ? tursoUrl 
+  : `file:${localDbPath.replace(/\\/g, '/')}`;
 
-// Enable foreign key constraints
-db.exec('PRAGMA foreign_keys = ON;');
+export const rawClient = createClient({
+  url: clientUrl,
+  authToken: isTurso ? tursoAuthToken : undefined,
+});
 
-export function initDatabase() {
-  // Create tables according to requirements:
+/**
+ * Clean unified async wrapper providing convenient query helpers (.get, .all, .run, .exec):
+ */
+export const db = {
+  client: rawClient,
+
+  async get(sql, ...args) {
+    const flatArgs = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+    const result = await rawClient.execute({ sql, args: flatArgs });
+    return result.rows.length > 0 ? { ...result.rows[0] } : null;
+  },
+
+  async all(sql, ...args) {
+    const flatArgs = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+    const result = await rawClient.execute({ sql, args: flatArgs });
+    return result.rows.map(r => ({ ...r }));
+  },
+
+  async run(sql, ...args) {
+    const flatArgs = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+    const result = await rawClient.execute({ sql, args: flatArgs });
+    return {
+      lastInsertRowid: result.lastInsertRowid !== undefined && result.lastInsertRowid !== null
+        ? Number(result.lastInsertRowid)
+        : null,
+      rowsAffected: result.rowsAffected
+    };
+  },
+
+  async exec(sql) {
+    await rawClient.executeMultiple(sql);
+  }
+};
+
+let isInitialized = false;
+
+export async function initDatabase() {
+  if (isInitialized) return;
+
   // users: id, name, email, password_hash, role, created_at
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -32,11 +78,7 @@ export function initDatabase() {
       department TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
-  `);
 
-  // courses: id, title, description, category, difficulty, instructor, duration, rating
-  // plus thumbnail, materials, quizzes, assignments to preserve full UI curriculum
-  db.exec(`
     CREATE TABLE IF NOT EXISTS courses (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -52,10 +94,7 @@ export function initDatabase() {
       assignments_json TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
-  `);
 
-  // enrollments: id, user_id, course_id, enrolled_at
-  db.exec(`
     CREATE TABLE IF NOT EXISTS enrollments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -65,11 +104,7 @@ export function initDatabase() {
       FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
       UNIQUE(user_id, course_id)
     );
-  `);
 
-  // progress: id, user_id, course_id, progress_percent, updated_at
-  // plus completed_materials_json, quiz_scores_json, assignments_json, certificate_issued
-  db.exec(`
     CREATE TABLE IF NOT EXISTS progress (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -84,10 +119,7 @@ export function initDatabase() {
       FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
       UNIQUE(user_id, course_id)
     );
-  `);
 
-  // sessions: token (32-char hex), user_id, created_at, expires_at
-  db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
@@ -98,22 +130,18 @@ export function initDatabase() {
   `);
 
   // Seed sample courses only when courses table is empty
-  const courseCountRow = db.prepare('SELECT COUNT(*) as count FROM courses').get();
-  if (courseCountRow && courseCountRow.count === 0) {
-    seedCourses();
+  const courseCountRow = await db.get('SELECT COUNT(*) as count FROM courses');
+  if (courseCountRow && Number(courseCountRow.count) === 0) {
+    await seedCourses();
   }
 
   // Seed default demo user if not already registered (Never overwrite existing data)
-  seedDefaultUsers();
+  await seedDefaultUsers();
+
+  isInitialized = true;
 }
 
-function seedCourses() {
-  const insertCourse = db.prepare(`
-    INSERT INTO courses (
-      id, title, description, category, difficulty, instructor, duration, rating, thumbnail, materials_json, quizzes_json, assignments_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
+async function seedCourses() {
   const initialCourses = [
     {
       id: "cs101",
@@ -248,7 +276,10 @@ function seedCourses() {
   ];
 
   for (const c of initialCourses) {
-    insertCourse.run(
+    await db.run(
+      `INSERT INTO courses (
+        id, title, description, category, difficulty, instructor, duration, rating, thumbnail, materials_json, quizzes_json, assignments_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       c.id,
       c.title,
       c.description,
@@ -265,13 +296,7 @@ function seedCourses() {
   }
 }
 
-function seedDefaultUsers() {
-  const checkUser = db.prepare('SELECT id FROM users WHERE email = ?');
-  const insertUser = db.prepare(`
-    INSERT INTO users (name, email, password_hash, role, roll_no, department)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-
+async function seedDefaultUsers() {
   const demoUsers = [
     {
       name: 'Aarav Patel',
@@ -292,10 +317,19 @@ function seedDefaultUsers() {
   ];
 
   for (const u of demoUsers) {
-    const existing = checkUser.get(u.email);
+    const existing = await db.get('SELECT id FROM users WHERE email = ?', u.email);
     if (!existing) {
       const passwordHash = bcrypt.hashSync(u.password, 10);
-      insertUser.run(u.name, u.email, passwordHash, u.role, u.roll_no, u.department);
+      await db.run(
+        `INSERT INTO users (name, email, password_hash, role, roll_no, department)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        u.name,
+        u.email,
+        passwordHash,
+        u.role,
+        u.roll_no,
+        u.department
+      );
     }
   }
 }

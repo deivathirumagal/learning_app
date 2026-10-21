@@ -7,15 +7,15 @@ import { authenticateToken } from '../middleware/authMiddleware.js';
 const router = express.Router();
 
 // Helper to generate a 32-character hexadecimal token (crypto.randomBytes(16).toString('hex'))
-function generateHexToken(userId) {
+async function generateHexToken(userId) {
   const token = crypto.randomBytes(16).toString('hex');
   // 24 hour session expiration
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   
-  db.prepare(`
+  await db.run(`
     INSERT INTO sessions (token, user_id, expires_at)
     VALUES (?, ?, ?)
-  `).run(token, userId, expiresAt);
+  `, token, userId, expiresAt);
 
   return token;
 }
@@ -36,20 +36,19 @@ router.post('/register', async (req, res) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    const existing = db.prepare('SELECT id FROM users WHERE LOWER(email) = ?').get(cleanEmail);
+    const existing = await db.get('SELECT id FROM users WHERE LOWER(email) = ?', cleanEmail);
     if (existing) {
       return res.status(400).json({ error: 'Email already registered. Please sign in instead.' });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const insert = db.prepare(`
+    const result = await db.run(`
       INSERT INTO users (name, email, password_hash, role, roll_no, department)
       VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    const result = insert.run(name.trim(), cleanEmail, passwordHash, role, rollNo || `STU-${Date.now()}`, department || 'General Studies');
+    `, name.trim(), cleanEmail, passwordHash, role, rollNo || `STU-${Date.now()}`, department || 'General Studies');
 
-    const newUser = db.prepare('SELECT id, name, email, role, roll_no, department FROM users WHERE id = ?').get(result.lastInsertRowid);
-    const token = generateHexToken(newUser.id);
+    const newUser = await db.get('SELECT id, name, email, role, roll_no, department FROM users WHERE id = ?', result.lastInsertRowid);
+    const token = await generateHexToken(newUser.id);
 
     return res.status(201).json({
       message: 'Registration successful.',
@@ -79,7 +78,7 @@ router.post('/login', async (req, res) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    const user = db.prepare('SELECT * FROM users WHERE LOWER(email) = ?').get(cleanEmail);
+    const user = await db.get('SELECT * FROM users WHERE LOWER(email) = ?', cleanEmail);
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password.' });
@@ -90,7 +89,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    const token = generateHexToken(user.id);
+    const token = await generateHexToken(user.id);
 
     return res.json({
       message: 'Login successful.',
@@ -125,17 +124,22 @@ router.get('/me', authenticateToken, (req, res) => {
 });
 
 // POST /api/auth/logout
-router.post('/logout', (req, res) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.startsWith('Bearer ') 
-    ? authHeader.substring(7) 
-    : authHeader;
+router.post('/logout', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.startsWith('Bearer ') 
+      ? authHeader.substring(7) 
+      : authHeader;
 
-  if (token) {
-    db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    if (token) {
+      await db.run('DELETE FROM sessions WHERE token = ?', token);
+    }
+
+    return res.json({ message: 'Logged out successfully.' });
+  } catch (err) {
+    console.error('Logout error:', err);
+    return res.status(500).json({ error: 'Internal server error during logout.' });
   }
-
-  return res.json({ message: 'Logged out successfully.' });
 });
 
 export default router;

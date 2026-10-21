@@ -24,10 +24,10 @@ function formatProgress(row) {
 }
 
 // GET /api/progress - Retrieve all progress records for authenticated user
-router.get('/', authenticateToken, (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
-    const rows = db.prepare(`
+    const rows = await db.all(`
       SELECT 
         e.id AS enrollment_id,
         e.course_id,
@@ -46,7 +46,7 @@ router.get('/', authenticateToken, (req, res) => {
       JOIN courses c ON p.course_id = c.id
       JOIN users u ON p.user_id = u.id
       WHERE p.user_id = ?
-    `).all(userId);
+    `, userId);
 
     return res.json(rows.map(formatProgress));
   } catch (err) {
@@ -56,7 +56,7 @@ router.get('/', authenticateToken, (req, res) => {
 });
 
 // PUT /api/progress/quiz - Submit quiz score and update progress
-router.put('/quiz', authenticateToken, (req, res) => {
+router.put('/quiz', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const { enrollmentId, courseId, quizId, score } = req.body;
@@ -64,7 +64,7 @@ router.put('/quiz', authenticateToken, (req, res) => {
     let targetCourseId = courseId;
     if (!targetCourseId && enrollmentId) {
       const numericId = parseInt(String(enrollmentId).replace('enr_', ''), 10);
-      const enr = db.prepare('SELECT course_id FROM enrollments WHERE id = ? AND user_id = ?').get(numericId, userId);
+      const enr = await db.get('SELECT course_id FROM enrollments WHERE id = ? AND user_id = ?', numericId, userId);
       if (enr) targetCourseId = enr.course_id;
     }
 
@@ -72,7 +72,7 @@ router.put('/quiz', authenticateToken, (req, res) => {
       return res.status(400).json({ error: 'courseId (or enrollmentId) and quizId are required.' });
     }
 
-    const rec = db.prepare('SELECT * FROM progress WHERE user_id = ? AND course_id = ?').get(userId, targetCourseId);
+    const rec = await db.get('SELECT * FROM progress WHERE user_id = ? AND course_id = ?', userId, targetCourseId);
     if (!rec) {
       return res.status(404).json({ error: 'Progress record not found. Please ensure you are enrolled.' });
     }
@@ -87,13 +87,13 @@ router.put('/quiz', authenticateToken, (req, res) => {
     const newPercent = Math.min(100, Math.max(rec.progress_percent, (rec.progress_percent || 0) + 20));
     const certIssued = newPercent >= 100 ? 1 : rec.certificate_issued;
 
-    db.prepare(`
+    await db.run(`
       UPDATE progress 
       SET progress_percent = ?, quiz_scores_json = ?, certificate_issued = ?, updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND course_id = ?
-    `).run(newPercent, JSON.stringify(quizScores), certIssued, userId, targetCourseId);
+    `, newPercent, JSON.stringify(quizScores), certIssued, userId, targetCourseId);
 
-    const updatedRow = db.prepare(`
+    const updatedRow = await db.get(`
       SELECT 
         e.id AS enrollment_id,
         e.course_id,
@@ -112,7 +112,7 @@ router.put('/quiz', authenticateToken, (req, res) => {
       JOIN courses c ON p.course_id = c.id
       JOIN users u ON p.user_id = u.id
       WHERE p.user_id = ? AND p.course_id = ?
-    `).get(userId, targetCourseId);
+    `, userId, targetCourseId);
 
     return res.json(formatProgress(updatedRow));
   } catch (err) {
@@ -122,7 +122,7 @@ router.put('/quiz', authenticateToken, (req, res) => {
 });
 
 // PUT /api/progress/assignment - Submit assignment and update progress
-router.put('/assignment', authenticateToken, (req, res) => {
+router.put('/assignment', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const { enrollmentId, courseId, assignmentId, submissionText } = req.body;
@@ -130,7 +130,7 @@ router.put('/assignment', authenticateToken, (req, res) => {
     let targetCourseId = courseId;
     if (!targetCourseId && enrollmentId) {
       const numericId = parseInt(String(enrollmentId).replace('enr_', ''), 10);
-      const enr = db.prepare('SELECT course_id FROM enrollments WHERE id = ? AND user_id = ?').get(numericId, userId);
+      const enr = await db.get('SELECT course_id FROM enrollments WHERE id = ? AND user_id = ?', numericId, userId);
       if (enr) targetCourseId = enr.course_id;
     }
 
@@ -138,7 +138,7 @@ router.put('/assignment', authenticateToken, (req, res) => {
       return res.status(400).json({ error: 'courseId (or enrollmentId) and assignmentId are required.' });
     }
 
-    const rec = db.prepare('SELECT * FROM progress WHERE user_id = ? AND course_id = ?').get(userId, targetCourseId);
+    const rec = await db.get('SELECT * FROM progress WHERE user_id = ? AND course_id = ?', userId, targetCourseId);
     if (!rec) {
       return res.status(404).json({ error: 'Progress record not found. Please ensure you are enrolled.' });
     }
@@ -154,13 +154,13 @@ router.put('/assignment', authenticateToken, (req, res) => {
     const newPercent = Math.min(100, Math.max(rec.progress_percent, (rec.progress_percent || 0) + 25));
     const certIssued = newPercent >= 100 ? 1 : rec.certificate_issued;
 
-    db.prepare(`
+    await db.run(`
       UPDATE progress 
       SET progress_percent = ?, assignments_json = ?, certificate_issued = ?, updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND course_id = ?
-    `).run(newPercent, JSON.stringify(assignments), certIssued, userId, targetCourseId);
+    `, newPercent, JSON.stringify(assignments), certIssued, userId, targetCourseId);
 
-    const updatedRow = db.prepare(`
+    const updatedRow = await db.get(`
       SELECT 
         e.id AS enrollment_id,
         e.course_id,
@@ -179,7 +179,7 @@ router.put('/assignment', authenticateToken, (req, res) => {
       JOIN courses c ON p.course_id = c.id
       JOIN users u ON p.user_id = u.id
       WHERE p.user_id = ? AND p.course_id = ?
-    `).get(userId, targetCourseId);
+    `, userId, targetCourseId);
 
     return res.json(formatProgress(updatedRow));
   } catch (err) {
@@ -189,7 +189,7 @@ router.put('/assignment', authenticateToken, (req, res) => {
 });
 
 // PUT /api/progress/:courseId - Update general progress and completed materials
-router.put('/:courseId', authenticateToken, (req, res) => {
+router.put('/:courseId', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
     let { courseId } = req.params;
@@ -198,13 +198,13 @@ router.put('/:courseId', authenticateToken, (req, res) => {
     // Check if courseId is an enrollment ID ('enr_123' or numeric)
     if (courseId.startsWith('enr_') || !isNaN(Number(courseId))) {
       const numericId = parseInt(courseId.replace('enr_', ''), 10);
-      const enr = db.prepare('SELECT course_id FROM enrollments WHERE id = ? AND user_id = ?').get(numericId, userId);
+      const enr = await db.get('SELECT course_id FROM enrollments WHERE id = ? AND user_id = ?', numericId, userId);
       if (enr) {
         courseId = enr.course_id;
       }
     }
 
-    const rec = db.prepare('SELECT * FROM progress WHERE user_id = ? AND course_id = ?').get(userId, courseId);
+    const rec = await db.get('SELECT * FROM progress WHERE user_id = ? AND course_id = ?', userId, courseId);
     if (!rec) {
       return res.status(404).json({ error: 'Progress record not found. Please ensure you are enrolled in this course.' });
     }
@@ -221,13 +221,13 @@ router.put('/:courseId', authenticateToken, (req, res) => {
 
     const certIssued = newPercent >= 100 ? 1 : rec.certificate_issued;
 
-    db.prepare(`
+    await db.run(`
       UPDATE progress 
       SET progress_percent = ?, completed_materials_json = ?, certificate_issued = ?, updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND course_id = ?
-    `).run(newPercent, JSON.stringify(completed), certIssued, userId, courseId);
+    `, newPercent, JSON.stringify(completed), certIssued, userId, courseId);
 
-    const updatedRow = db.prepare(`
+    const updatedRow = await db.get(`
       SELECT 
         e.id AS enrollment_id,
         e.course_id,
@@ -246,7 +246,7 @@ router.put('/:courseId', authenticateToken, (req, res) => {
       JOIN courses c ON p.course_id = c.id
       JOIN users u ON p.user_id = u.id
       WHERE p.user_id = ? AND p.course_id = ?
-    `).get(userId, courseId);
+    `, userId, courseId);
 
     return res.json(formatProgress(updatedRow));
   } catch (err) {

@@ -25,11 +25,11 @@ function formatEnrollment(row) {
 }
 
 // GET /api/enrollments - Retrieve enrolled courses for currently authenticated user
-router.get('/', authenticateToken, (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const rows = db.prepare(`
+    const rows = await db.all(`
       SELECT 
         e.id AS enrollment_id,
         e.course_id,
@@ -49,7 +49,7 @@ router.get('/', authenticateToken, (req, res) => {
       LEFT JOIN progress p ON p.user_id = e.user_id AND p.course_id = e.course_id
       WHERE e.user_id = ?
       ORDER BY e.enrolled_at DESC
-    `).all(userId);
+    `, userId);
 
     const enrollments = rows.map(formatEnrollment);
     return res.json(enrollments);
@@ -60,7 +60,7 @@ router.get('/', authenticateToken, (req, res) => {
 });
 
 // POST /api/enrollments - Enroll in a course (Protected, duplicate check)
-router.post('/', authenticateToken, (req, res) => {
+router.post('/', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
     const { courseId } = req.body;
@@ -70,33 +70,31 @@ router.post('/', authenticateToken, (req, res) => {
     }
 
     // Verify course exists
-    const course = db.prepare('SELECT id, title, category FROM courses WHERE id = ?').get(courseId);
+    const course = await db.get('SELECT id, title, category FROM courses WHERE id = ?', courseId);
     if (!course) {
       return res.status(404).json({ error: `Course '${courseId}' not found.` });
     }
 
     // Check duplicate enrollment for the same user and course
-    const existing = db.prepare('SELECT id FROM enrollments WHERE user_id = ? AND course_id = ?').get(userId, courseId);
+    const existing = await db.get('SELECT id FROM enrollments WHERE user_id = ? AND course_id = ?', userId, courseId);
     if (existing) {
       return res.status(400).json({ error: 'Duplicate Enrollment: You are already enrolled in this course.' });
     }
 
     // Insert into enrollments
-    const insertEnrollment = db.prepare(`
+    const enrResult = await db.run(`
       INSERT INTO enrollments (user_id, course_id, enrolled_at)
       VALUES (?, ?, CURRENT_TIMESTAMP)
-    `);
-    const enrResult = insertEnrollment.run(userId, courseId);
+    `, userId, courseId);
 
     // Initialize corresponding progress record
-    const insertProgress = db.prepare(`
+    await db.run(`
       INSERT INTO progress (user_id, course_id, progress_percent, completed_materials_json, quiz_scores_json, assignments_json, certificate_issued)
       VALUES (?, ?, 10, '[]', '{}', '{}', 0)
-    `);
-    insertProgress.run(userId, courseId);
+    `, userId, courseId);
 
     // Fetch the newly created record
-    const newRow = db.prepare(`
+    const newRow = await db.get(`
       SELECT 
         e.id AS enrollment_id,
         e.course_id,
@@ -115,7 +113,7 @@ router.post('/', authenticateToken, (req, res) => {
       JOIN users u ON e.user_id = u.id
       LEFT JOIN progress p ON p.user_id = e.user_id AND p.course_id = e.course_id
       WHERE e.id = ?
-    `).get(enrResult.lastInsertRowid);
+    `, enrResult.lastInsertRowid);
 
     return res.status(201).json(formatEnrollment(newRow));
   } catch (err) {
